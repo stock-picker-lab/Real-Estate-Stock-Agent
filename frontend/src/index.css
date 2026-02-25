@@ -1663,7 +1663,7 @@ body {
   border-radius: 10px;
 }
 
-.news-loading {
+.news-loading, .news-empty {
   padding: 20px;
   text-align: center;
   color: var(--text-muted);

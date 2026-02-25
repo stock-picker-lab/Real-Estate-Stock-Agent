@@ -74,22 +74,22 @@ export default function RatingMethodology() {
                 AI大模型评分 (50%)
               </div>
               <div className="methodology-col-desc">
-                由腾讯混元2.0大模型进行专业分析，每只股票单独评估
+                由腾讯混元2.0大模型结合实时资讯联网搜索进行专业分析
               </div>
               <div className="dimension-list">
                 <DimensionItem
+                  name="政策资讯影响"
+                  weight="35%"
+                  desc="最新房地产政策、调控文件、行业新闻、市场供需变化，实时联网获取"
+                />
+                <DimensionItem
                   name="公司基本面"
-                  weight="40%"
+                  weight="30%"
                   desc="经营质量、财务健康(三道红线)、土储质量、销售回款、管理层能力"
                 />
                 <DimensionItem
-                  name="行业政策与周期"
-                  weight="30%"
-                  desc="房地产调控政策、行业周期阶段、融资环境、市场供需格局"
-                />
-                <DimensionItem
                   name="技术面与资金面"
-                  weight="20%"
+                  weight="25%"
                   desc="价格趋势、机构资金动向、北向资金、筹码结构分析"
                 />
                 <DimensionItem

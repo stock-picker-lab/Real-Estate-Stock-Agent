@@ -37,7 +37,14 @@ export default function NewsSection() {
   }
 
   if (allNews.length === 0) {
-    return null
+    return (
+      <div className="news-section">
+        <div className="news-header">
+          <h3>📰 房地产政策资讯</h3>
+        </div>
+        <div className="news-empty">暂无资讯数据，将在下次刷新时获取</div>
+      </div>
+    )
   }
 
   return (
