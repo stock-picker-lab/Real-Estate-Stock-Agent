@@ -568,10 +568,14 @@ async def download_report(rid: int, db: AsyncSession = Depends(get_db)):
     filepath = os.path.join(UPLOAD_DIR, report.filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="文件不存在")
+    from urllib.parse import quote
+    encoded_name = quote(report.original_name, safe='')
     return FileResponse(
         filepath,
-        filename=report.original_name,
         media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+        },
     )
 
 
@@ -588,10 +592,15 @@ async def preview_report(rid: int, db: AsyncSession = Depends(get_db)):
     filepath = os.path.join(UPLOAD_DIR, report.filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="文件不存在")
+    from urllib.parse import quote
+    encoded_name = quote(report.original_name, safe='')
     return FileResponse(
         filepath,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=\"{report.original_name}\""},
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{encoded_name}",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -718,19 +727,30 @@ async def share_report(rid: int, request: Request, db: AsyncSession = Depends(ge
     if not report:
         return HTMLResponse("<h1>内容不存在或已下架</h1>", status_code=404)
 
+    import html as html_mod
+    safe_title = html_mod.escape(report.title)
+    safe_institution = html_mod.escape(report.institution or "")
+    safe_author = html_mod.escape(report.author or "")
+    safe_summary = html_mod.escape(report.summary or "")
+    safe_original_name = html_mod.escape(report.original_name or "")
+
     file_size_str = f"{report.file_size / (1024*1024):.1f} MB" if report.file_size > 1024*1024 else f"{report.file_size / 1024:.1f} KB"
     download_url = f"/api/reports/{rid}/download"
     preview_url = f"/api/reports/{rid}/preview"
     ext = os.path.splitext(report.filename)[1].lower()
 
     summary_html = ""
-    if report.summary:
-        summary_html = f"<p>{report.summary}</p>"
+    if safe_summary:
+        summary_html = f"<p>{safe_summary}</p>"
 
-    # PDF 文件提供 iframe 内嵌预览
+    # PDF 文件提供 iframe 内嵌预览 + 错误容错
     if ext == ".pdf":
         preview_html = f"""<div style="margin-top:16px">
-<iframe src="{preview_url}" style="width:100%;height:70vh;border:1px solid #eee;border-radius:8px" allowfullscreen></iframe>
+<iframe src="{preview_url}" style="width:100%;height:70vh;border:1px solid #eee;border-radius:8px" allowfullscreen
+  onerror="this.style.display='none';document.getElementById('pdf-fallback').style.display='block'"></iframe>
+<div id="pdf-fallback" style="display:none;padding:20px;text-align:center;background:#f8f9fa;border-radius:8px">
+<p style="color:#666">PDF预览加载失败，请直接下载查看</p>
+</div>
 <div style="text-align:center;margin-top:12px">
 <a href="{download_url}" class="dl-btn">下载报告</a>
 </div>
@@ -738,18 +758,18 @@ async def share_report(rid: int, request: Request, db: AsyncSession = Depends(ge
     else:
         preview_html = f"""<div style="margin-top:16px;padding:16px;background:#f8f9fa;border-radius:8px;text-align:center">
 <div style="font-size:36px;margin-bottom:8px">📄</div>
-<div style="font-size:14px;color:#666;margin-bottom:4px">{report.original_name}</div>
+<div style="font-size:14px;color:#666;margin-bottom:4px">{safe_original_name}</div>
 <div style="font-size:12px;color:#999">{file_size_str}</div>
 <a href="{download_url}" class="dl-btn">下载报告</a>
 </div>"""
 
     content_html = f"""
 <div class="share-header">
-<h1>{report.title}</h1>
+<h1>{safe_title}</h1>
 <div class="share-meta">
 <span class="share-tag tag-report">研究报告</span>
-{f'<span>{report.institution}</span>' if report.institution else ''}
-<span>{report.author}</span>
+{f'<span>{safe_institution}</span>' if safe_institution else ''}
+<span>{safe_author}</span>
 <span>{report.publish_date}</span>
 </div>
 </div>

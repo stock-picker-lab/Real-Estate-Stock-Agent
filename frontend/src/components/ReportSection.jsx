@@ -153,6 +153,7 @@ function ReportUploader({ onClose, onUploaded }) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -168,7 +169,8 @@ function ReportUploader({ onClose, onUploaded }) {
       formData.append('publish_date', publishDate)
       formData.append('file', file)
       await api.uploadReport(formData)
-      onUploaded()
+      setSuccess(true)
+      setTimeout(() => onUploaded(), 1200)
     } catch (err) {
       setError(err.message || '上传失败')
     } finally {
@@ -183,6 +185,13 @@ function ReportUploader({ onClose, onUploaded }) {
           <h3>上传研究报告</h3>
           <button className="detail-close" onClick={onClose}>×</button>
         </div>
+        {success ? (
+          <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--green)' }}>上传成功！</div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 8 }}>报告已发布，即将返回列表...</div>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="editor-form">
           <div className="form-group">
             <label>报告标题</label>
@@ -226,6 +235,7 @@ function ReportUploader({ onClose, onUploaded }) {
             </button>
           </div>
         </form>
+        )}
       </div>
     </div>
   )
