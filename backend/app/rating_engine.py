@@ -2,7 +2,7 @@
 房地产股票AI评级引擎（量化 + 基本面 + 大模型混合评级）
 
 评级架构:
-  量化技术评分 (40%) + 基本面评分 (15%) + AI大模型评分 (45%)
+  量化技术评分 (30%) + 基本面评分 (30%) + AI大模型评分 (40%)
 
 一、量化技术评分（5个维度，各0-100分）:
   1. 趋势评分 (Trend) - 权重25%:
@@ -23,9 +23,9 @@
 三、AI大模型评分 (0-100分):
   腾讯混元重点分析公司基本面、财务状况、行业政策、市场情绪，给出AI综合评分和专业分析
 
-综合评分 = 量化评分 × 40% + 基本面评分 × 15% + AI评分 × 45%
-（若基本面不可用，则量化50% + AI50%）
-（若AI不可用，则100%使用量化评分+基本面）
+综合评分 = 量化评分 × 30% + 基本面评分 × 30% + AI评分 × 40%
+（若基本面不可用，则量化40% + AI60%）
+（若AI不可用，则量化50% + 基本面50%）
 
 评级映射:
   >= 80: 优选
@@ -57,13 +57,13 @@ QUANT_WEIGHTS = {
     "value": 0.20,
 }
 
-QUANT_RATIO = 0.40  # 量化评分占比
-FUNDAMENTAL_RATIO = 0.15  # 基本面评分占比
-AI_RATIO = 0.45     # AI评分占比
+QUANT_RATIO = 0.30  # 量化评分占比
+FUNDAMENTAL_RATIO = 0.30  # 基本面评分占比
+AI_RATIO = 0.40     # AI评分占比
 
 # 无基本面数据时的降级比例
-QUANT_RATIO_NO_FUND = 0.50
-AI_RATIO_NO_FUND = 0.50
+QUANT_RATIO_NO_FUND = 0.40
+AI_RATIO_NO_FUND = 0.60
 
 RATING_MAP = [
     (80, "优选"),
@@ -1132,8 +1132,8 @@ async def rate_stock(df: pd.DataFrame, name: str = "", code: str = "", market: s
     else:
         ai_score = 0.0
         if has_fund:
-            # AI不可用: 量化70% + 基本面30%
-            total = round(quant_total * 0.70 + fundamental_score * 0.30, 2)
+            # AI不可用: 量化50% + 基本面50%
+            total = round(quant_total * 0.50 + fundamental_score * 0.50, 2)
         else:
             total = round(quant_total, 2)
         reason = ""
