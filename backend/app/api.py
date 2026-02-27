@@ -707,7 +707,7 @@ async def share_commentary(cid: int, request: Request, db: AsyncSession = Depend
 </div>
 </div>
 <div class="share-body">
-<div>{item.content.replace(chr(10)+chr(10), '</div><div style="margin-bottom:12px">').replace(chr(10), ' ')}</div>
+<div>{'</div><div style="margin-bottom:12px">'.join(p for p in item.content.split(chr(10)) if p.strip())}</div>
 {stocks_html}
 </div>"""
 
@@ -741,13 +741,31 @@ async def share_report(rid: int, request: Request, db: AsyncSession = Depends(ge
 
     summary_html = ""
     if safe_summary:
-        # 将双换行保留为段落分隔，单换行转为空格（修复PDF提取的碎片断行）
+        # 智能分段：双换行一定分段；单换行时，如果上一行以句号等结尾则分段，否则合并（PDF碎片断行）
         import re as _re
-        cleaned = _re.sub(r'\n{2,}', '\n\n', safe_summary)  # 统一多换行为双换行
-        paragraphs = cleaned.split('\n\n')
-        # 每个段落内的单换行替换为空格
-        paragraphs = [p.replace('\n', ' ').strip() for p in paragraphs if p.strip()]
-        summary_html = ''.join(f"<p style='margin-bottom:12px'>{p}</p>" for p in paragraphs)
+        # 先统一换行符
+        text = safe_summary.replace('\r\n', '\n').replace('\r', '\n')
+        # 双换行替换为占位符保留段落
+        text = _re.sub(r'\n{2,}', '\n\n', text)
+        lines = text.split('\n')
+        paragraphs = []
+        current = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                # 空行 = 段落分隔
+                if current:
+                    paragraphs.append(' '.join(current))
+                    current = []
+                continue
+            current.append(stripped)
+            # 如果该行以段落结束标点结尾，视为段落结束
+            if _re.search(r'[。！？.!?\u201d"】）)；;：:]$', stripped):
+                paragraphs.append(' '.join(current))
+                current = []
+        if current:
+            paragraphs.append(' '.join(current))
+        summary_html = ''.join(f"<p style='margin-bottom:12px'>{p}</p>" for p in paragraphs if p)
 
     # PDF 文件提供 iframe 内嵌预览 + 错误容错
     if ext == ".pdf":
