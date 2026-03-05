@@ -45,7 +45,7 @@ function QuantAIMethodology() {
       <div className="methodology-fallback">AI采用DeepSeek V3.2+GLM-5+Kimi K2.5三模型融合；情绪因子基于关键词+双速衰减+AI反馈；若基本面不可用则量化30%+情绪12%+AI58%</div>
 
       <div className="methodology-columns">
-        {/* 左列: 量化 */}
+        {/* 列1: 量化 */}
         <div className="methodology-col">
           <div className="methodology-col-title">
             <span className="col-dot quant-dot" />
@@ -60,11 +60,28 @@ function QuantAIMethodology() {
             <DimensionItem name="波动率评分" weight="12%" desc="年化波动率、布林带宽度+价格位置、ATR(14)相对波动、波动率收敛/发散趋势" />
             <DimensionItem name="成交量评分" weight="18%" desc="多级量比(5/10/20日)、OBV能量潮、VWAP偏离度、量价配合度、成交量趋势" />
             <DimensionItem name="价值评分" weight="18%" desc="区间位置连续评分、筹码集中度、多级支撑压力(10/20/60日)、价格动态区间" />
-            <DimensionItem name="情绪评分" weight="12%" desc="30正面+25负面房地产关键词、双速衰减模型(新闻3天/公告7天)、AI情绪反馈融合" />
+            <DimensionItem name="情绪评分" weight="12%" desc="量化维度内的情绪子分，基于关键词命中与衰减模型，详见情绪因子列" />
           </div>
         </div>
 
-        {/* 中列: 基本面 */}
+        {/* 列2: 情绪因子 */}
+        <div className="methodology-col">
+          <div className="methodology-col-title">
+            <span className="col-dot" style={{background:'#e67e22'}} />
+            情绪因子评分 (10%)
+          </div>
+          <div className="methodology-col-desc">
+            基于房地产行业新闻与公告的舆情分析，量化市场情绪对股价的影响
+          </div>
+          <div className="dimension-list">
+            <DimensionItem name="关键词匹配" weight="基础" desc="30个正面关键词(政策利好、销售回暖等) + 25个负面关键词(债务违约、暴雷等)加权匹配" />
+            <DimensionItem name="双速衰减模型" weight="时效" desc="新闻类信息半衰期3天快速衰减、公告类信息半衰期7天缓慢衰减，越新影响越大" />
+            <DimensionItem name="AI情绪反馈" weight="融合" desc="三模型AI分析结果反馈融入情绪评分，形成量化↔AI双向修正闭环" />
+            <DimensionItem name="情绪评分范围" weight="0~100" desc="综合正负面关键词命中数、时间衰减权重、AI反馈，归一化到0-100分" />
+          </div>
+        </div>
+
+        {/* 列3: 基本面 */}
         <div className="methodology-col">
           <div className="methodology-col-title">
             <span className="col-dot" style={{background:'var(--green)'}} />
@@ -83,7 +100,7 @@ function QuantAIMethodology() {
           </div>
         </div>
 
-        {/* 右列: AI */}
+        {/* 列4: AI */}
         <div className="methodology-col">
           <div className="methodology-col-title">
             <span className="col-dot ai-dot" />
