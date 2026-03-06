@@ -158,3 +158,20 @@ class PortfolioWeight(Base):
     stock_code = Column(String(20), nullable=False)
     weight = Column(Float, nullable=False, default=0)  # 仓位百分比 0~100
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class DailyDigest(Base):
+    """每日AI日报（行业日报 / 自选股日报）"""
+    __tablename__ = "daily_digests"
+    __table_args__ = (
+        UniqueConstraint("digest_date", "digest_type", "user_id", name="uq_digest_date_type_user"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    digest_date = Column(Date, nullable=False, index=True)
+    digest_type = Column(String(20), nullable=False)  # industry=行业日报, watchlist=自选股日报
+    user_id = Column(Integer, nullable=False, default=0)  # 0=全局(行业日报), >0=用户专属(自选股日报)
+    title = Column(String(300), nullable=False)
+    content = Column(Text, nullable=False)
+    model_sources = Column(String(200), default="")  # 使用的模型来源，如 "DeepSeek,GLM-5,Kimi"
+    created_at = Column(DateTime, default=datetime.now)

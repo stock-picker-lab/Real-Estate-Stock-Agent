@@ -232,3 +232,18 @@ class PortfolioPerformance(BaseModel):
     total_return: float  # 总收益率 %
     annualized_return: Optional[float] = None  # 年化收益率 %
     max_drawdown: Optional[float] = None  # 最大回撤 %
+
+
+# ========== 每日日报相关 ==========
+class DailyDigestOut(BaseModel):
+    id: int
+    digest_date: date
+    digest_type: str
+    user_id: int
+    title: str
+    content: str
+    model_sources: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

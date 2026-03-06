@@ -10,6 +10,7 @@ import ReportSection from './components/ReportSection'
 import UserManagement from './components/UserManagement'
 import NewsSection from './components/NewsSection'
 import WatchlistSection from './components/WatchlistSection'
+import DailyDigestPanel from './components/DailyDigestPanel'
 
 const BASE_TABS = [
   { key: 'rating', label: 'AI评级' },
@@ -210,6 +211,7 @@ export default function App() {
 
             <StatsCards dashboard={dashboard} modelType={modelType} />
             <NewsSection />
+            <DailyDigestPanel type="industry" />
             <RatingMethodology modelType={modelType} />
 
             <div className="filters">

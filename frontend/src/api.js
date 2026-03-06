@@ -169,4 +169,10 @@ export const api = {
     }),
   getPortfolioPerformance: (days = 30) =>
     request(`/portfolio/performance?days=${days}`),
+
+  // ========== 每日AI日报 ==========
+  getIndustryDigest: (force = false) =>
+    request(`/digest/industry${force ? '?force=true' : ''}`),
+  getWatchlistDigest: (force = false) =>
+    request(`/digest/watchlist${force ? '?force=true' : ''}`),
 }

@@ -20,7 +20,7 @@ from app.auth import (
 )
 from app.config import UPLOAD_DIR
 from app.database import get_db
-from app.models import Stock, Rating, StockPrice, User, Commentary, Report, Watchlist, PortfolioWeight
+from app.models import Stock, Rating, StockPrice, User, Commentary, Report, Watchlist, PortfolioWeight, DailyDigest
 from app.news_fetcher import fetch_filtered_news, fetch_stock_news
 from app.ifind_client import fetch_recent_announcements, fetch_reports
 from app.schemas import (
@@ -30,6 +30,7 @@ from app.schemas import (
     ReportOut,
     WatchlistAdd, WatchlistOut, WatchlistAnalysisItem,
     PortfolioWeightUpdate, PortfolioWeightOut, PortfolioPerformance, PortfolioDailyReturn,
+    DailyDigestOut,
 )
 
 router = APIRouter(prefix="/api")
@@ -1072,6 +1073,355 @@ async def get_portfolio_performance(
         annualized_return=annualized,
         max_drawdown=max_drawdown,
     )
+
+
+# ========== 每日AI日报接口 ==========
+
+async def _build_industry_digest_prompt(db: AsyncSession) -> str:
+    """构建行业日报的 prompt，汇总当日评级数据"""
+    today = date.today()
+
+    # 获取两个模型最新评级
+    summaries = []
+    for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+        latest_date = await db.scalar(
+            select(func.max(Rating.date)).where(Rating.model_type == model_type)
+        )
+        if not latest_date:
+            continue
+        result = await db.execute(
+            select(Rating)
+            .join(Stock, Rating.code == Stock.code)
+            .where(Rating.date == latest_date, Rating.model_type == model_type, Stock.is_active == 1)
+            .order_by(desc(Rating.total_score))
+        )
+        ratings = result.scalars().all()
+        if not ratings:
+            continue
+
+        total = len(ratings)
+        avg_score = sum(r.total_score for r in ratings) / total
+        dist = {}
+        for r in ratings:
+            dist[r.rating] = dist.get(r.rating, 0) + 1
+
+        top5 = ratings[:5]
+        bottom3 = ratings[-3:]
+
+        summary = f"【{label}模型】评级日期{latest_date}，共{total}只股票，均分{avg_score:.1f}。"
+        summary += f"评级分布：" + "、".join(f"{k}{v}只" for k, v in dist.items()) + "。"
+        summary += f"Top5：" + "、".join(f"{r.name}({r.total_score:.1f}分/{r.rating})" for r in top5) + "。"
+        summary += f"末位：" + "、".join(f"{r.name}({r.total_score:.1f}分/{r.rating})" for r in bottom3) + "。"
+
+        # 找有基本面数据的优选股
+        featured = [r for r in ratings if r.rating == "优选" and r.reason][:3]
+        if featured:
+            summary += "重点优选股分析：" + "；".join(
+                f"{r.name}—{r.reason[:150]}" for r in featured
+            )
+        summaries.append(summary)
+
+    if not summaries:
+        return ""
+
+    return f"""你是一位资深房地产行业研究员，请基于以下AI评级系统的最新数据，撰写一份专业的房地产行业每日日报。
+
+评级数据汇总：
+{"  ".join(summaries)}
+
+要求：
+1. 标题：简明扼要概括今日行情重点（15-25字）
+2. 内容分4个部分，使用Markdown格式：
+   - **市场总览**：今日房地产板块整体表现、评级分布变化
+   - **重点个股**：综合两个模型评级结果，点评表现突出和值得关注的个股（3-5只）
+   - **风险提示**：评级下调或谨慎评级的个股及原因
+   - **明日展望**：短期趋势判断和操作建议
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "日报标题", "content": "Markdown格式的日报正文"}}"""
+
+
+async def _build_watchlist_digest_prompt(
+    db: AsyncSession, user_id: int
+) -> str:
+    """构建自选股日报的 prompt，结合仓位和评级"""
+    # 获取用户自选股
+    wl_result = await db.execute(
+        select(Watchlist).where(Watchlist.user_id == user_id).order_by(Watchlist.added_at)
+    )
+    watchlist = wl_result.scalars().all()
+    if not watchlist:
+        return ""
+
+    codes = [w.stock_code for w in watchlist]
+
+    # 获取仓位
+    pw_result = await db.execute(
+        select(PortfolioWeight).where(
+            PortfolioWeight.user_id == user_id,
+            PortfolioWeight.stock_code.in_(codes),
+        )
+    )
+    weight_map = {pw.stock_code: pw.weight for pw in pw_result.scalars().all()}
+
+    # 获取评级数据
+    stock_details = []
+    for w in watchlist:
+        detail = f"{w.stock_name}({w.stock_code}, {w.market}股)"
+        pw = weight_map.get(w.stock_code, 0)
+        if pw > 0:
+            detail += f"，仓位{pw:.1f}%"
+        else:
+            detail += "，未配置仓位"
+
+        for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+            latest_date = await db.scalar(
+                select(func.max(Rating.date)).where(Rating.model_type == model_type)
+            )
+            if latest_date:
+                r_result = await db.execute(
+                    select(Rating).where(
+                        Rating.code == w.stock_code,
+                        Rating.date == latest_date,
+                        Rating.model_type == model_type,
+                    )
+                )
+                r = r_result.scalar_one_or_none()
+                if r:
+                    detail += f"；{label}评分{r.total_score:.1f}/{r.rating}"
+                    if r.reason:
+                        detail += f"({r.reason[:100]})"
+        stock_details.append(detail)
+
+    # 组合收益率简要
+    perf_note = ""
+    has_weights = any(v > 0 for v in weight_map.values())
+    if has_weights:
+        from collections import defaultdict
+        start_date = date.today() - timedelta(days=40)
+        price_q = (
+            select(StockPrice)
+            .where(StockPrice.code.in_(codes), StockPrice.date >= start_date)
+            .order_by(StockPrice.date)
+        )
+        price_rows = (await db.execute(price_q)).scalars().all()
+        price_by_code = defaultdict(list)
+        for p in price_rows:
+            price_by_code[p.code].append((p.date, p.close))
+        daily_rets = defaultdict(dict)
+        for code, prices in price_by_code.items():
+            prices.sort(key=lambda x: x[0])
+            for i in range(1, len(prices)):
+                if prices[i-1][1] and prices[i-1][1] > 0:
+                    ret = (prices[i][1] - prices[i-1][1]) / prices[i-1][1] * 100
+                    daily_rets[code][prices[i][0]] = ret
+        all_dates = sorted(set(d for rets in daily_rets.values() for d in rets.keys()))[-30:]
+        cum_factor = 1.0
+        for d in all_dates:
+            port_ret = 0
+            for code in codes:
+                w_pct = weight_map.get(code, 0) / 100.0
+                port_ret += daily_rets.get(code, {}).get(d, 0) * w_pct
+            cum_factor *= (1 + port_ret / 100)
+        total_ret = (cum_factor - 1) * 100
+        perf_note = f"模拟组合近30日累计收益率：{total_ret:+.2f}%。"
+
+    total_weight = sum(weight_map.values())
+    weight_status = f"总仓位{total_weight:.1f}%（{'已满配' if abs(total_weight - 100) < 0.01 else '未满配'}）"
+
+    return f"""你是一位专业的房地产股票投资顾问。以下是用户自选股票池（{len(watchlist)}只）的最新情况：
+
+{weight_status}。{perf_note}
+
+各股票详情：
+{"；".join(stock_details)}
+
+请基于以上数据，撰写一份个性化的自选股每日综合日报。要求：
+1. 标题：简明概括自选组合今日要点（15-25字）
+2. 内容分4个部分，使用Markdown格式：
+   - **组合概览**：自选股整体表现，仓位配置合理性评估
+   - **个股点评**：逐一简评每只自选股的最新评级表现和趋势（每只1-2句话）
+   - **仓位建议**：基于最新评级，建议是否调整仓位配置（具体到个股）
+   - **风险与机会**：需要关注的风险因素和潜在机会
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "日报标题", "content": "Markdown格式的日报正文"}}"""
+
+
+async def _generate_digest_with_multi_model(prompt: str) -> dict:
+    """三模型并发生成日报，融合结果"""
+    import asyncio
+    import re
+    from app.llm_client import chat_deepseek, chat_glm, chat_kimi
+    from app.config import DEEPSEEK_ENABLED, GLM_ENABLED, KIMI_ENABLED
+
+    system = "你是房地产行业资深研究员，擅长撰写专业的投研日报。请直接返回JSON，不要有其他文字。"
+
+    tasks = []
+    task_labels = []
+    if DEEPSEEK_ENABLED:
+        tasks.append(chat_deepseek(prompt, system=system, temperature=0.4, enable_search=True))
+        task_labels.append("DeepSeek")
+    if GLM_ENABLED:
+        tasks.append(chat_glm(prompt, system=system, temperature=0.4))
+        task_labels.append("GLM-5")
+    if KIMI_ENABLED:
+        tasks.append(chat_kimi(prompt, system=system))
+        task_labels.append("Kimi")
+
+    if not tasks:
+        return {"title": "", "content": "", "sources": ""}
+
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    parsed_results = []
+    sources = []
+    for resp, label in zip(raw_results, task_labels):
+        if isinstance(resp, Exception) or not resp:
+            continue
+        try:
+            json_match = re.search(r'\{.*\}', resp, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                if parsed.get("title") and parsed.get("content"):
+                    parsed_results.append({"label": label, **parsed})
+                    sources.append(label)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"解析{label}日报失败: {e}")
+
+    if not parsed_results:
+        return {"title": "", "content": "", "sources": ""}
+
+    if len(parsed_results) == 1:
+        r = parsed_results[0]
+        return {"title": r["title"], "content": r["content"], "sources": r["label"]}
+
+    # 多模型融合：取第一个模型的标题，内容融合
+    title = parsed_results[0]["title"]
+    # 融合策略：取最长的那个作为主体（通常质量更好），附上模型来源
+    best = max(parsed_results, key=lambda x: len(x["content"]))
+    content = best["content"]
+    source_str = ",".join(sources)
+
+    return {"title": title, "content": content, "sources": source_str}
+
+
+import logging as _logging
+_digest_logger = _logging.getLogger(__name__)
+
+
+@router.get("/digest/industry", response_model=DailyDigestOut)
+async def get_industry_digest(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成行业日报（每日缓存，force=True强制重新生成）"""
+    today = date.today()
+
+    # 查找今日缓存
+    if not force:
+        cached = await db.execute(
+            select(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "industry",
+                DailyDigest.user_id == 0,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    # 生成新日报
+    prompt = await _build_industry_digest_prompt(db)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="暂无评级数据，无法生成行业日报")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成日报失败，请稍后重试")
+
+    # 如果 force，删除旧的
+    if force:
+        await db.execute(
+            delete(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "industry",
+                DailyDigest.user_id == 0,
+            )
+        )
+
+    digest = DailyDigest(
+        digest_date=today,
+        digest_type="industry",
+        user_id=0,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
+
+
+@router.get("/digest/watchlist", response_model=DailyDigestOut)
+async def get_watchlist_digest(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成自选股日报（每日每用户缓存）"""
+    today = date.today()
+
+    if not force:
+        cached = await db.execute(
+            select(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "watchlist",
+                DailyDigest.user_id == user.id,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    # 检查用户有自选股
+    wl_count = await db.scalar(
+        select(func.count(Watchlist.id)).where(Watchlist.user_id == user.id)
+    )
+    if not wl_count:
+        raise HTTPException(status_code=404, detail="请先添加自选股")
+
+    prompt = await _build_watchlist_digest_prompt(db, user.id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="暂无数据，无法生成日报")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成日报失败，请稍后重试")
+
+    if force:
+        await db.execute(
+            delete(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "watchlist",
+                DailyDigest.user_id == user.id,
+            )
+        )
+
+    digest = DailyDigest(
+        digest_date=today,
+        digest_type="watchlist",
+        user_id=user.id,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
 
 
 # ========== 公开分享页面（无需登录） ==========

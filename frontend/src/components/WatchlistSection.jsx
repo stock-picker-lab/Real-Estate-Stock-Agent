@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api'
+import DailyDigestPanel from './DailyDigestPanel'
 
 const MAX_WATCHLIST = 15
 const CACHE_KEY = 'watchlist_analysis'
@@ -36,7 +37,7 @@ export default function WatchlistSection({ user, onSelectStock }) {
   const mountedRef = useRef(true)
 
   // 模拟仓位相关
-  const [showPortfolio, setShowPortfolio] = useState(false)
+  const [showPortfolio, setShowPortfolio] = useState(true)
   const [weights, setWeights] = useState({})        // { stock_code: number }
   const [savedWeights, setSavedWeights] = useState({})
   const [savingWeights, setSavingWeights] = useState(false)
@@ -128,6 +129,13 @@ export default function WatchlistSection({ user, onSelectStock }) {
     loadStocks()
     loadPortfolioWeights()
   }, [loadWatchlist, loadStocks, loadPortfolioWeights])
+
+  // 自动加载收益率（仓位默认展开）
+  useEffect(() => {
+    if (Object.keys(savedWeights).length > 0) {
+      loadPerformance()
+    }
+  }, [savedWeights, loadPerformance])
 
   const handleAdd = async (stock) => {
     setAddLoading(true)
@@ -255,10 +263,10 @@ export default function WatchlistSection({ user, onSelectStock }) {
           {watchlist.length > 0 && (
             <button
               className="btn"
-              onClick={() => { setShowPortfolio(!showPortfolio); if (!showPortfolio && Object.keys(savedWeights).length > 0) loadPerformance() }}
+              onClick={() => setShowPortfolio(!showPortfolio)}
               style={showPortfolio ? { background: 'var(--primary)', color: '#fff' } : {}}
             >
-              {showPortfolio ? '收起仓位' : '模拟仓位'}
+              {showPortfolio ? '收起仓位' : '展开仓位'}
             </button>
           )}
           {watchlist.length < MAX_WATCHLIST && (
@@ -522,6 +530,11 @@ export default function WatchlistSection({ user, onSelectStock }) {
             </div>
           )}
         </div>
+      )}
+
+      {/* 自选股每日综合日报 */}
+      {watchlist.length > 0 && (
+        <DailyDigestPanel type="watchlist" />
       )}
 
       <style>{`
