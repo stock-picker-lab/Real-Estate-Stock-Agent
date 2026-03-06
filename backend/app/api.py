@@ -1797,6 +1797,157 @@ async def get_watchlist_digest(
     return digest
 
 
+async def _build_ai_picks_digest_prompt(db: AsyncSession) -> str:
+    """构建AI推荐选股日报的 prompt，汇总AI选股组合数据"""
+    today = date.today()
+
+    # 获取今日AI选股缓存
+    cached = await db.execute(
+        select(AIPick).where(AIPick.pick_date == today)
+    )
+    ai_pick = cached.scalar_one_or_none()
+    if not ai_pick:
+        return ""
+
+    picks_data = json.loads(ai_pick.picks_json)
+    if not picks_data:
+        return ""
+
+    # 构建选股详情
+    stock_details = []
+    for p in picks_data:
+        code = p.get("code", "")
+        name = p.get("name", "")
+        market = p.get("market", "")
+        weight = p.get("weight", 0)
+        reason = p.get("reason", "")
+        detail = f"{name}({code}, {market}股)，建议仓位{weight:.1f}%"
+        if reason:
+            detail += f"，推荐理由：{reason[:120]}"
+
+        # 获取最新评级
+        for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+            latest_date = await db.scalar(
+                select(func.max(Rating.date)).where(Rating.model_type == model_type)
+            )
+            if latest_date:
+                r_result = await db.execute(
+                    select(Rating).where(
+                        Rating.code == code,
+                        Rating.date == latest_date,
+                        Rating.model_type == model_type,
+                    )
+                )
+                r = r_result.scalar_one_or_none()
+                if r:
+                    detail += f"；{label}评分{r.total_score:.1f}/{r.rating}"
+        stock_details.append(detail)
+
+    # 计算组合近30日收益率
+    codes = [p.get("code", "") for p in picks_data]
+    weight_map = {p.get("code", ""): p.get("weight", 0) for p in picks_data}
+    perf_note = ""
+    from collections import defaultdict
+    start_date = today - timedelta(days=40)
+    price_q = (
+        select(StockPrice)
+        .where(StockPrice.code.in_(codes), StockPrice.date >= start_date)
+        .order_by(StockPrice.date)
+    )
+    price_rows = (await db.execute(price_q)).scalars().all()
+    if price_rows:
+        price_by_code = defaultdict(list)
+        for p in price_rows:
+            price_by_code[p.code].append((p.date, p.close))
+        daily_rets = defaultdict(dict)
+        for code, prices in price_by_code.items():
+            prices.sort(key=lambda x: x[0])
+            for i in range(1, len(prices)):
+                if prices[i-1][1] and prices[i-1][1] > 0:
+                    ret = (prices[i][1] - prices[i-1][1]) / prices[i-1][1] * 100
+                    daily_rets[code][prices[i][0]] = ret
+        all_dates = sorted(set(d for rets in daily_rets.values() for d in rets.keys()))[-30:]
+        cum_factor = 1.0
+        for d in all_dates:
+            port_ret = 0
+            for code in codes:
+                w_pct = weight_map.get(code, 0) / 100.0
+                port_ret += daily_rets.get(code, {}).get(d, 0) * w_pct
+            cum_factor *= (1 + port_ret / 100)
+        total_ret = (cum_factor - 1) * 100
+        perf_note = f"AI推荐组合近30日模拟累计收益率：{total_ret:+.2f}%。"
+
+    return f"""你是一位专业的房地产股票投资顾问。以下是AI智能选股系统（三模型融合：DeepSeek V3.2 + GLM-5 + Kimi K2.5）今日推荐的股票组合（{len(picks_data)}只）：
+
+{perf_note}
+
+各股票详情：
+{"；".join(stock_details)}
+
+请基于以上AI推荐组合数据，撰写一份AI推荐选股每日综合日报。要求：
+1. 标题：简明概括AI选股组合今日要点（15-25字）
+2. 内容分4个部分，使用Markdown格式：
+   - **组合概览**：AI选股组合的整体配置策略、行业/市场分布特征
+   - **重点推荐解读**：解读仓位最重的2-3只股票的推荐逻辑
+   - **组合表现与展望**：收益率分析，近期趋势判断，预期走势
+   - **风险提示**：组合主要风险因素和建议关注的事项
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "日报标题", "content": "Markdown格式的日报正文"}}"""
+
+
+@router.get("/digest/ai-picks", response_model=DailyDigestOut)
+async def get_ai_picks_digest(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成AI推荐选股日报（每日缓存）"""
+    today = date.today()
+
+    if not force:
+        cached = await db.execute(
+            select(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "ai_picks",
+                DailyDigest.user_id == 0,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    prompt = await _build_ai_picks_digest_prompt(db)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="暂无AI推荐选股数据，请先生成AI推荐组合")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成日报失败，请稍后重试")
+
+    if force:
+        await db.execute(
+            delete(DailyDigest).where(
+                DailyDigest.digest_date == today,
+                DailyDigest.digest_type == "ai_picks",
+                DailyDigest.user_id == 0,
+            )
+        )
+
+    digest = DailyDigest(
+        digest_date=today,
+        digest_type="ai_picks",
+        user_id=0,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
+
+
 # ========== 公开分享页面（无需登录） ==========
 
 def _share_html(title: str, description: str, content_html: str, meta_extra: str = "", request: Request = None) -> str:

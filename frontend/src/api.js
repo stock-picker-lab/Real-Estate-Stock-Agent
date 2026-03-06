@@ -175,6 +175,8 @@ export const api = {
     request(`/digest/industry${force ? '?force=true' : ''}`),
   getWatchlistDigest: (force = false) =>
     request(`/digest/watchlist${force ? '?force=true' : ''}`),
+  getAiPicksDigest: (force = false) =>
+    request(`/digest/ai-picks${force ? '?force=true' : ''}`),
 
   // ========== AI推荐选股 ==========
   getAIPicks: (force = false, days = 30) => {

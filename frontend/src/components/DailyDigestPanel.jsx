@@ -13,11 +13,13 @@ export default function DailyDigestPanel({ type, onRefresh }) {
     try {
       const data = type === 'industry'
         ? await api.getIndustryDigest(force)
+        : type === 'ai_picks'
+        ? await api.getAiPicksDigest(force)
         : await api.getWatchlistDigest(force)
       setDigest(data)
     } catch (err) {
       if (err.message?.includes('404')) {
-        setError(type === 'industry' ? '暂无评级数据，无法生成日报' : '请先添加自选股')
+        setError(type === 'industry' ? '暂无评级数据，无法生成日报' : type === 'ai_picks' ? '请先生成AI推荐组合' : '请先添加自选股')
       } else {
         setError(err.message || '加载失败')
       }
@@ -86,8 +88,9 @@ export default function DailyDigestPanel({ type, onRefresh }) {
   }
 
   const isIndustry = type === 'industry'
-  const title = isIndustry ? '每日地产行业日报' : '自选股每日综合日报'
-  const icon = isIndustry ? '📰' : '📊'
+  const isAiPicks = type === 'ai_picks'
+  const title = isIndustry ? '每日地产行业日报' : isAiPicks ? 'AI推荐选股日报' : '自选股每日综合日报'
+  const icon = isIndustry ? '📰' : isAiPicks ? '🤖' : '📊'
 
   return (
     <div className="digest-panel">

@@ -275,6 +275,9 @@ export default function WatchlistSection({ user }) {
                   />
                 </div>
               )}
+
+              {/* AI推荐选股日报 */}
+              <DailyDigestPanel type="ai_picks" />
             </>
           )}
         </div>
