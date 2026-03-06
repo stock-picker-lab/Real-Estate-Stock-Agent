@@ -211,7 +211,6 @@ export default function App() {
 
             <StatsCards dashboard={dashboard} modelType={modelType} />
             <NewsSection />
-            <DailyDigestPanel type="industry" />
             <RatingMethodology modelType={modelType} />
 
             <div className="filters">
@@ -288,6 +287,8 @@ export default function App() {
                 onSelect={handleSelectStock}
               />
             )}
+
+            <DailyDigestPanel type="industry" />
           </>
         )}
 

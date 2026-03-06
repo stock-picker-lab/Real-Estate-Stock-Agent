@@ -5,7 +5,7 @@ export default function DailyDigestPanel({ type, onRefresh }) {
   const [digest, setDigest] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
 
   const loadDigest = useCallback(async (force = false) => {
     setLoading(true)
@@ -88,14 +88,11 @@ export default function DailyDigestPanel({ type, onRefresh }) {
   const isIndustry = type === 'industry'
   const title = isIndustry ? '每日地产行业日报' : '自选股每日综合日报'
   const icon = isIndustry ? '📰' : '📊'
-  const gradientFrom = isIndustry ? '#667eea' : '#f59e0b'
-  const gradientTo = isIndustry ? '#764ba2' : '#ef4444'
 
   return (
     <div className="digest-panel">
       <div
         className="digest-header"
-        style={{ background: `linear-gradient(135deg, ${gradientFrom} 0%, ${gradientTo} 100%)` }}
         onClick={() => setExpanded(!expanded)}
       >
         <div className="digest-header-left">
@@ -171,15 +168,17 @@ export default function DailyDigestPanel({ type, onRefresh }) {
           background: var(--card-bg, #fff);
         }
         .digest-header {
-          padding: 16px 20px;
+          padding: 14px 20px;
           cursor: pointer;
           display: flex;
           justify-content: space-between;
           align-items: center;
-          transition: opacity 0.2s;
+          transition: background 0.2s;
+          background: var(--bg, #f9fafb);
+          border-bottom: 1px solid var(--border, #e5e7eb);
         }
         .digest-header:hover {
-          opacity: 0.95;
+          background: #f3f4f6;
         }
         .digest-header-left {
           display: flex;
@@ -191,13 +190,13 @@ export default function DailyDigestPanel({ type, onRefresh }) {
         }
         .digest-title {
           margin: 0;
-          font-size: 16px;
+          font-size: 15px;
           font-weight: 600;
-          color: #fff;
+          color: #1a1a1a;
         }
         .digest-date {
           font-size: 12px;
-          color: rgba(255,255,255,0.8);
+          color: var(--text-muted, #9ca3af);
         }
         .digest-header-right {
           display: flex;
@@ -206,23 +205,24 @@ export default function DailyDigestPanel({ type, onRefresh }) {
         }
         .digest-regen-btn {
           padding: 4px 14px;
-          border: 1px solid rgba(255,255,255,0.4);
+          border: 1px solid var(--border, #e5e7eb);
           border-radius: 6px;
-          background: rgba(255,255,255,0.15);
-          color: #fff;
+          background: var(--card-bg, #fff);
+          color: var(--text-muted, #6b7280);
           font-size: 12px;
           cursor: pointer;
           transition: all 0.15s;
         }
         .digest-regen-btn:hover:not(:disabled) {
-          background: rgba(255,255,255,0.25);
+          border-color: var(--primary, #667eea);
+          color: var(--primary, #667eea);
         }
         .digest-regen-btn:disabled {
           opacity: 0.6;
           cursor: wait;
         }
         .digest-toggle {
-          color: rgba(255,255,255,0.8);
+          color: var(--text-muted, #9ca3af);
           font-size: 12px;
         }
         .digest-body {
