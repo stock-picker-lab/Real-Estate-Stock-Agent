@@ -183,4 +183,10 @@ export const api = {
     qs.set('days', days)
     return request(`/ai-picks?${qs}`)
   },
+
+  // ========== 管理员操作 ==========
+  adminRefreshRatings: () =>
+    request('/admin/refresh-ratings', { method: 'POST' }),
+  adminRefreshStatus: () =>
+    request('/admin/refresh-status'),
 }

@@ -24,6 +24,7 @@ from app.database import get_db
 from app.models import Stock, Rating, StockPrice, User, Commentary, Report, Watchlist, PortfolioWeight, DailyDigest, AIPick
 from app.news_fetcher import fetch_filtered_news, fetch_stock_news
 from app.ifind_client import fetch_recent_announcements, fetch_reports
+from app.scheduler import refresh_all_data
 from app.schemas import (
     StockOut, RatingOut, PriceOut, DashboardStats, RatingHistoryOut,
     LoginRequest, RegisterRequest, TokenResponse, UserOut,
@@ -118,6 +119,44 @@ async def delete_user(
     await db.execute(delete(User).where(User.id == uid))
     await db.commit()
     return {"ok": True}
+
+
+# ========== 管理员操作 ==========
+
+# 用于防止并发重复刷新
+import asyncio as _asyncio
+_refresh_lock = _asyncio.Lock()
+_refresh_running = False
+
+
+@router.post("/admin/refresh-ratings")
+async def admin_refresh_ratings(user: User = Depends(require_admin)):
+    """管理员手动触发全体评分刷新（后台异步执行）"""
+    global _refresh_running
+    if _refresh_running:
+        raise HTTPException(status_code=409, detail="评分刷新正在进行中，请稍后再试")
+
+    async def _run_refresh():
+        global _refresh_running
+        async with _refresh_lock:
+            _refresh_running = True
+            try:
+                logger.info(f"管理员 {user.username} 手动触发全体评分刷新")
+                count = await refresh_all_data()
+                logger.info(f"管理员手动刷新完成，成功评分 {count} 只股票")
+            except Exception as e:
+                logger.error(f"管理员手动刷新失败: {e}")
+            finally:
+                _refresh_running = False
+
+    _asyncio.get_event_loop().create_task(_run_refresh())
+    return {"ok": True, "message": "评分刷新已启动，将在后台执行，预计需要数分钟完成"}
+
+
+@router.get("/admin/refresh-status")
+async def admin_refresh_status(user: User = Depends(require_admin)):
+    """查询评分刷新是否在进行中"""
+    return {"running": _refresh_running}
 
 
 # ========== 仪表盘和评级接口（保持原有） ==========

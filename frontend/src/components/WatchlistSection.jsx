@@ -25,7 +25,7 @@ const RATING_COLORS = {
 let _analyzePromise = null
 
 export default function WatchlistSection({ user }) {
-  const [subTab, setSubTab] = useState('my') // 'my' | 'ai'
+  const [subTab, setSubTab] = useState('ai') // 'ai' | 'my'
   const [watchlist, setWatchlist] = useState([])
   const [analysis, setAnalysis] = useState([])
   const [stocks, setStocks] = useState([])
@@ -124,8 +124,8 @@ export default function WatchlistSection({ user }) {
   }, [savedWeights, loadPerformance])
 
   useEffect(() => {
-    if (subTab === 'ai' && !aiPicks && !aiPicksLoading) loadAIPicks()
-  }, [subTab, aiPicks, aiPicksLoading, loadAIPicks])
+    if (!aiPicks && !aiPicksLoading) loadAIPicks()
+  }, [aiPicks, aiPicksLoading, loadAIPicks])
 
   const handleAdd = async (stock) => {
     setAddLoading(true)
@@ -206,13 +206,79 @@ export default function WatchlistSection({ user }) {
     <div className="watchlist-section">
       {/* 子板块切换 */}
       <div className="sub-tabs">
-        <button className={`sub-tab ${subTab === 'my' ? 'active' : ''}`} onClick={() => setSubTab('my')}>
-          我的自选股
-        </button>
         <button className={`sub-tab ${subTab === 'ai' ? 'active' : ''}`} onClick={() => setSubTab('ai')}>
           AI推荐选股
         </button>
+        <button className={`sub-tab ${subTab === 'my' ? 'active' : ''}`} onClick={() => setSubTab('my')}>
+          我的自选股
+        </button>
       </div>
+
+      {/* ===== AI推荐选股 ===== */}
+      {subTab === 'ai' && (
+        <div className="ai-picks-section">
+          <div className="section-header">
+            <div className="section-title-row">
+              <h2 className="section-title">AI推荐选股组合</h2>
+              <span className="section-desc">三模型融合，每日自动生成最优组合</span>
+            </div>
+            <button className="btn btn-primary" onClick={() => loadAIPicks(true)} disabled={aiPicksLoading}>
+              {aiPicksLoading ? '生成中...' : '刷新推荐'}
+            </button>
+          </div>
+
+          {aiPicksLoading && !aiPicks && (
+            <div className="loading" style={{ padding: '40px 0' }}><div className="loading-dot" /><div className="loading-dot" /><div className="loading-dot" /></div>
+          )}
+
+          {aiPicks && (
+            <>
+              <div className="ai-picks-meta">
+                <span>生成日期: {aiPicks.generated_date}</span>
+                <span>模型: {aiPicks.model_sources}</span>
+              </div>
+
+              <div className="ai-picks-grid">
+                {aiPicks.picks.map(p => (
+                  <div key={p.stock_code} className="ai-pick-card">
+                    <div className="ai-pick-header">
+                      <div>
+                        <span className="ai-pick-name">{p.stock_name}</span>
+                        <span className="ai-pick-code">{p.stock_code}</span>
+                        <span className={`chip-market chip-market-${p.market}`}>{p.market}</span>
+                      </div>
+                      <span className="ai-pick-weight">{p.weight.toFixed(1)}%</span>
+                    </div>
+                    <div className="ai-pick-body">
+                      {p.rating && (
+                        <span className="ai-pick-rating" style={{ color: RATING_COLORS[p.rating] || '#6b7280' }}>
+                          {p.rating} {p.score != null ? `${p.score.toFixed(1)}分` : ''}
+                        </span>
+                      )}
+                      <span className="ai-pick-reason">{p.reason}</span>
+                    </div>
+                    <div className="ai-pick-bar">
+                      <div className="ai-pick-bar-fill" style={{ width: `${Math.min(100, p.weight)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {aiPicks.performance && (
+                <div className="portfolio-section" style={{ marginTop: 16 }}>
+                  <PerformancePanel
+                    performance={aiPicks.performance}
+                    perfDays={aiPicksDays}
+                    setPerfDays={setAiPicksDays}
+                    loadPerformance={(d) => loadAIPicks(false, d)}
+                    perfLoading={aiPicksLoading}
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {/* ===== 我的自选股 ===== */}
       {subTab === 'my' && (
@@ -359,72 +425,7 @@ export default function WatchlistSection({ user }) {
         </>
       )}
 
-      {/* ===== AI推荐选股 ===== */}
-      {subTab === 'ai' && (
-        <div className="ai-picks-section">
-          <div className="section-header">
-            <div className="section-title-row">
-              <h2 className="section-title">AI推荐选股组合</h2>
-              <span className="section-desc">三模型融合，每日自动生成最优组合</span>
-            </div>
-            <button className="btn btn-primary" onClick={() => loadAIPicks(true)} disabled={aiPicksLoading}>
-              {aiPicksLoading ? '生成中...' : '刷新推荐'}
-            </button>
-          </div>
-
-          {aiPicksLoading && !aiPicks && (
-            <div className="loading" style={{ padding: '40px 0' }}><div className="loading-dot" /><div className="loading-dot" /><div className="loading-dot" /></div>
-          )}
-
-          {aiPicks && (
-            <>
-              <div className="ai-picks-meta">
-                <span>生成日期: {aiPicks.generated_date}</span>
-                <span>模型: {aiPicks.model_sources}</span>
-              </div>
-
-              <div className="ai-picks-grid">
-                {aiPicks.picks.map(p => (
-                  <div key={p.stock_code} className="ai-pick-card">
-                    <div className="ai-pick-header">
-                      <div>
-                        <span className="ai-pick-name">{p.stock_name}</span>
-                        <span className="ai-pick-code">{p.stock_code}</span>
-                        <span className={`chip-market chip-market-${p.market}`}>{p.market}</span>
-                      </div>
-                      <span className="ai-pick-weight">{p.weight.toFixed(1)}%</span>
-                    </div>
-                    <div className="ai-pick-body">
-                      {p.rating && (
-                        <span className="ai-pick-rating" style={{ color: RATING_COLORS[p.rating] || '#6b7280' }}>
-                          {p.rating} {p.score != null ? `${p.score.toFixed(1)}分` : ''}
-                        </span>
-                      )}
-                      <span className="ai-pick-reason">{p.reason}</span>
-                    </div>
-                    <div className="ai-pick-bar">
-                      <div className="ai-pick-bar-fill" style={{ width: `${Math.min(100, p.weight)}%` }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {aiPicks.performance && (
-                <div className="portfolio-section" style={{ marginTop: 16 }}>
-                  <PerformancePanel
-                    performance={aiPicks.performance}
-                    perfDays={aiPicksDays}
-                    setPerfDays={setAiPicksDays}
-                    loadPerformance={(d) => loadAIPicks(false, d)}
-                    perfLoading={aiPicksLoading}
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
+      {/* 子板块结束 */}
       <style>{`
         .sub-tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 2px solid var(--border, #e5e7eb); }
         .sub-tab { padding: 10px 24px; border: none; background: none; font-size: 15px; font-weight: 500; color: var(--text-muted, #6b7280); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }

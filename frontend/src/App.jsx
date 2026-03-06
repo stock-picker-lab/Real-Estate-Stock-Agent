@@ -59,6 +59,8 @@ export default function App() {
   const [sortDir, setSortDir] = useState('desc')
   const [dates, setDates] = useState([])
   const [selectedDate, setSelectedDate] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshRunning, setRefreshRunning] = useState(false)
 
   // 检查已有的登录状态
   useEffect(() => {
@@ -146,6 +148,45 @@ export default function App() {
     setUser(null)
   }
 
+  // 管理员手动刷新评分
+  const handleAdminRefresh = async () => {
+    const confirmed = window.confirm(
+      '⚠️ 确认要刷新全体股票评分吗？\n\n此操作将重新计算所有60只股票的双模型评级，预计需要5-10分钟完成。'
+    )
+    if (!confirmed) return
+
+    const confirmed2 = window.confirm(
+      '再次确认：刷新评分将消耗大量API资源，确定执行？'
+    )
+    if (!confirmed2) return
+
+    setRefreshing(true)
+    try {
+      await api.adminRefreshRatings()
+      setRefreshRunning(true)
+      alert('评分刷新已启动，将在后台执行。页面会自动刷新数据。')
+    } catch (e) {
+      alert('刷新失败: ' + (e.message || '未知错误'))
+      setRefreshing(false)
+    }
+  }
+
+  // 轮询刷新状态
+  useEffect(() => {
+    if (!refreshRunning) return
+    const timer = setInterval(async () => {
+      try {
+        const status = await api.adminRefreshStatus()
+        if (!status.running) {
+          setRefreshRunning(false)
+          setRefreshing(false)
+          loadData()
+        }
+      } catch {}
+    }, 15000)
+    return () => clearInterval(timer)
+  }, [refreshRunning, loadData])
+
   if (!authChecked) {
     return (
       <div className="loading" style={{ height: '100vh' }}>
@@ -198,15 +239,33 @@ export default function App() {
           <>
             {/* 模型切换 */}
             <div className="model-switcher">
-              {MODEL_OPTIONS.map(m => (
+              <div style={{ display: 'flex', gap: 0 }}>
+                {MODEL_OPTIONS.map(m => (
+                  <button
+                    key={m.value}
+                    className={`model-btn ${modelType === m.value ? 'active' : ''}`}
+                    onClick={() => { setModelType(m.value); setSelectedDate('') }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              {user?.is_admin && (
                 <button
-                  key={m.value}
-                  className={`model-btn ${modelType === m.value ? 'active' : ''}`}
-                  onClick={() => { setModelType(m.value); setSelectedDate('') }}
+                  className="btn btn-sm"
+                  style={{
+                    background: refreshing ? '#f3f4f6' : '#fee2e2',
+                    color: refreshing ? '#9ca3af' : '#991b1b',
+                    border: '1px solid',
+                    borderColor: refreshing ? '#d1d5db' : '#fca5a5',
+                    fontWeight: 500,
+                  }}
+                  onClick={handleAdminRefresh}
+                  disabled={refreshing}
                 >
-                  {m.label}
+                  {refreshing ? '评分刷新中...' : '刷新全体评分'}
                 </button>
-              ))}
+              )}
             </div>
 
             <StatsCards dashboard={dashboard} modelType={modelType} />

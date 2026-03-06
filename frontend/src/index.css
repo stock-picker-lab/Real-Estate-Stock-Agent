@@ -197,13 +197,14 @@ body {
 /* 模型切换 */
 .model-switcher {
   display: flex;
-  gap: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 16px;
   background: var(--bg-card);
   border-radius: var(--radius);
   padding: 4px;
   box-shadow: var(--shadow);
-  width: fit-content;
 }
 
 .model-btn {
