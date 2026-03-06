@@ -11,12 +11,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 
 from app.api import router
 from app.config import ADMIN_USERNAME, ADMIN_PASSWORD, UPLOAD_DIR
 from app.database import init_db, async_session
-from app.models import Rating, Stock, User
+from app.models import Rating, Stock, User, DailyDigest, AIPick
 from app.auth import hash_password
 from app.scheduler import init_stock_list, refresh_all_data
 from app.news_fetcher import preload_news_cache
@@ -87,6 +87,89 @@ async def check_and_refresh():
         logger.info(f"今日({today})双模型评级数据已完整，跳过刷新")
 
 
+async def generate_all_digests():
+    """每日自动生成所有日报（行业日报 + AI选股日报）"""
+    from app.api import (
+        _build_industry_digest_prompt,
+        _build_ai_picks_digest_prompt,
+        _generate_digest_with_multi_model,
+    )
+
+    today = date.today()
+    logger.info(f"开始自动生成每日日报 ({today})...")
+
+    async with async_session() as db:
+        # 1. 行业日报
+        try:
+            existing = await db.execute(
+                select(DailyDigest).where(
+                    DailyDigest.digest_date == today,
+                    DailyDigest.digest_type == "industry",
+                    DailyDigest.user_id == 0,
+                )
+            )
+            if existing.scalar_one_or_none():
+                logger.info("行业日报今日已存在，跳过")
+            else:
+                prompt = await _build_industry_digest_prompt(db)
+                if prompt:
+                    result = await _generate_digest_with_multi_model(prompt)
+                    if result["title"]:
+                        digest = DailyDigest(
+                            digest_date=today,
+                            digest_type="industry",
+                            user_id=0,
+                            title=result["title"],
+                            content=result["content"],
+                            model_sources=result["sources"],
+                        )
+                        db.add(digest)
+                        await db.commit()
+                        logger.info(f"✓ 行业日报已生成: {result['title'][:30]}")
+                    else:
+                        logger.warning("行业日报: AI生成失败")
+                else:
+                    logger.warning("行业日报: 暂无评级数据，跳过")
+        except Exception as e:
+            logger.error(f"行业日报生成失败: {e}")
+
+        # 2. AI选股日报
+        try:
+            existing = await db.execute(
+                select(DailyDigest).where(
+                    DailyDigest.digest_date == today,
+                    DailyDigest.digest_type == "ai_picks",
+                    DailyDigest.user_id == 0,
+                )
+            )
+            if existing.scalar_one_or_none():
+                logger.info("AI选股日报今日已存在，跳过")
+            else:
+                prompt = await _build_ai_picks_digest_prompt(db)
+                if prompt:
+                    result = await _generate_digest_with_multi_model(prompt)
+                    if result["title"]:
+                        digest = DailyDigest(
+                            digest_date=today,
+                            digest_type="ai_picks",
+                            user_id=0,
+                            title=result["title"],
+                            content=result["content"],
+                            model_sources=result["sources"],
+                        )
+                        db.add(digest)
+                        await db.commit()
+                        logger.info(f"✓ AI选股日报已生成: {result['title'][:30]}")
+                    else:
+                        logger.warning("AI选股日报: AI生成失败")
+                else:
+                    logger.warning("AI选股日报: 暂无AI选股数据，跳过")
+        except Exception as e:
+            logger.error(f"AI选股日报生成失败: {e}")
+
+    logger.info("每日日报自动生成完成")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import os
@@ -98,17 +181,26 @@ async def lifespan(app: FastAPI):
     await init_admin()
     logger.info("数据库初始化完成")
 
-    # 定时任务: 每天 7:00 自动刷新数据和评分
+    # 定时任务1: 每天 6:00 自动刷新数据和评分
     scheduler.add_job(
         refresh_all_data,
         "cron",
-        hour=7,
+        hour=6,
         minute=0,
-        id="refresh_07",
+        id="refresh_06",
+        replace_existing=True,
+    )
+    # 定时任务2: 每天 9:00 自动生成所有日报（评分完成后）
+    scheduler.add_job(
+        generate_all_digests,
+        "cron",
+        hour=9,
+        minute=0,
+        id="digest_09",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("定时任务已启动: 每天 7:00 自动刷新数据和评级")
+    logger.info("定时任务已启动: 每天 6:00 评分 + 9:00 生成日报")
 
     # 启动时检查并自动刷新（后台异步执行，不阻塞启动）
     asyncio.create_task(check_and_refresh())
