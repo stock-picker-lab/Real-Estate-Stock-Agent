@@ -21,7 +21,7 @@ from app.auth import (
 )
 from app.config import UPLOAD_DIR
 from app.database import get_db
-from app.models import Stock, Rating, StockPrice, User, Commentary, Report, Watchlist, PortfolioWeight, DailyDigest, AIPick
+from app.models import Stock, Rating, StockPrice, User, Commentary, Report, Watchlist, PortfolioWeight, DailyDigest, WeeklyDigest, AIPick
 from app.news_fetcher import fetch_filtered_news, fetch_stock_news
 from app.ifind_client import fetch_recent_announcements, fetch_reports
 from app.scheduler import refresh_all_data
@@ -33,6 +33,7 @@ from app.schemas import (
     WatchlistAdd, WatchlistOut, WatchlistAnalysisItem,
     PortfolioWeightUpdate, PortfolioWeightOut, PortfolioPerformance, PortfolioDailyReturn,
     DailyDigestOut,
+    WeeklyDigestOut, WeeklyDigestListOut,
     AIPickItem, AIPicksOut,
 )
 
@@ -1974,6 +1975,581 @@ async def get_ai_picks_digest(
     await db.commit()
     await db.refresh(digest)
     return digest
+
+
+# ========== 每周AI周报接口 ==========
+
+def _get_week_range(target_date: date = None):
+    """获取指定日期所在周的周一和周五"""
+    if target_date is None:
+        target_date = date.today()
+    weekday = target_date.weekday()  # 0=周一, 6=周日
+    week_start = target_date - timedelta(days=weekday)
+    week_end = week_start + timedelta(days=4)  # 周五
+    return week_start, week_end
+
+
+async def _build_weekly_industry_prompt(db: AsyncSession) -> str:
+    """构建行业周报 prompt，汇总本周所有交易日的评级数据变化"""
+    week_start, week_end = _get_week_range()
+    today = date.today()
+
+    summaries = []
+    for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+        # 获取本周最新评级
+        latest_date = await db.scalar(
+            select(func.max(Rating.date)).where(
+                Rating.model_type == model_type,
+                Rating.date >= week_start,
+                Rating.date <= today,
+            )
+        )
+        if not latest_date:
+            continue
+
+        result = await db.execute(
+            select(Rating)
+            .join(Stock, Rating.code == Stock.code)
+            .where(Rating.date == latest_date, Rating.model_type == model_type, Stock.is_active == 1)
+            .order_by(desc(Rating.total_score))
+        )
+        latest_ratings = result.scalars().all()
+        if not latest_ratings:
+            continue
+
+        total = len(latest_ratings)
+        avg_score = sum(r.total_score for r in latest_ratings) / total
+        dist = {}
+        for r in latest_ratings:
+            dist[r.rating] = dist.get(r.rating, 0) + 1
+
+        top5 = latest_ratings[:5]
+        bottom3 = latest_ratings[-3:]
+
+        summary = f"【{label}模型】周末评级日期{latest_date}，共{total}只股票，均分{avg_score:.1f}。"
+        summary += f"评级分布：" + "、".join(f"{k}{v}只" for k, v in dist.items()) + "。"
+        summary += f"Top5：" + "、".join(f"{r.name}({r.total_score:.1f}分/{r.rating})" for r in top5) + "。"
+        summary += f"末位：" + "、".join(f"{r.name}({r.total_score:.1f}分/{r.rating})" for r in bottom3) + "。"
+
+        # 对比周初数据
+        week_start_date = await db.scalar(
+            select(func.min(Rating.date)).where(
+                Rating.model_type == model_type,
+                Rating.date >= week_start,
+                Rating.date <= today,
+            )
+        )
+        if week_start_date and week_start_date != latest_date:
+            result_start = await db.execute(
+                select(Rating)
+                .join(Stock, Rating.code == Stock.code)
+                .where(Rating.date == week_start_date, Rating.model_type == model_type, Stock.is_active == 1)
+            )
+            start_ratings = {r.code: r for r in result_start.scalars().all()}
+            if start_ratings:
+                start_avg = sum(r.total_score for r in start_ratings.values()) / len(start_ratings)
+                score_change = avg_score - start_avg
+                summary += f"本周评分变化：均分{'上升' if score_change > 0 else '下降'}{abs(score_change):.1f}分。"
+
+                # 本周升降幅最大的股票
+                changes = []
+                for r in latest_ratings:
+                    if r.code in start_ratings:
+                        chg = r.total_score - start_ratings[r.code].total_score
+                        changes.append((r.name, r.code, chg, r.total_score, r.rating))
+                changes.sort(key=lambda x: x[2], reverse=True)
+                if changes:
+                    top_up = [c for c in changes[:3] if c[2] > 0]
+                    top_down = [c for c in changes[-3:] if c[2] < 0]
+                    if top_up:
+                        summary += "本周评分上升最多：" + "、".join(f"{c[0]}(+{c[2]:.1f})" for c in top_up) + "。"
+                    if top_down:
+                        summary += "本周评分下降最多：" + "、".join(f"{c[0]}({c[2]:.1f})" for c in top_down) + "。"
+
+        # 找有基本面数据的优选股
+        featured = [r for r in latest_ratings if r.rating == "优选" and r.reason][:3]
+        if featured:
+            summary += "重点优选股分析：" + "；".join(
+                f"{r.name}—{r.reason[:150]}" for r in featured
+            )
+        summaries.append(summary)
+
+    if not summaries:
+        return ""
+
+    # 获取本周的日报标题作为回顾素材
+    daily_digests_q = await db.execute(
+        select(DailyDigest).where(
+            DailyDigest.digest_date >= week_start,
+            DailyDigest.digest_date <= today,
+            DailyDigest.digest_type == "industry",
+            DailyDigest.user_id == 0,
+        ).order_by(DailyDigest.digest_date)
+    )
+    daily_titles = [d.title for d in daily_digests_q.scalars().all()]
+    daily_recap = ""
+    if daily_titles:
+        daily_recap = f"本周日报回顾：{'、'.join(daily_titles)}。"
+
+    return f"""你是一位资深房地产行业首席研究员，请基于以下AI评级系统的本周数据，撰写一份深度的房地产行业周报。
+
+本周时间范围：{week_start} 至 {week_end}
+
+评级数据汇总：
+{"  ".join(summaries)}
+
+{daily_recap}
+
+要求：
+1. 标题：简明扼要概括本周行情重点（15-30字），体现周报特征
+2. 内容分6个部分，使用Markdown格式，比日报更有深度和分析性：
+   - **本周市场回顾**：房地产板块本周整体表现，评级分布变化趋势，重要事件回顾
+   - **评级变动分析**：本周评分变化最大的个股分析，升级/降级原因深度解读
+   - **重点个股深度点评**：综合两个模型评级结果，深度点评3-5只重点个股（含基本面分析）
+   - **行业趋势与政策解读**：近期房地产政策变化、宏观环境对板块的影响分析
+   - **下周展望与策略建议**：下周趋势判断、关注要点和投资策略建议
+   - **风险警示**：本周需要特别关注的风险因素
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "周报标题", "content": "Markdown格式的周报正文"}}"""
+
+
+async def _build_weekly_ai_picks_prompt(db: AsyncSession) -> str:
+    """构建AI推荐选股周报 prompt，汇总本周AI选股数据"""
+    week_start, week_end = _get_week_range()
+    today = date.today()
+
+    # 获取本周所有AI选股数据
+    picks_q = await db.execute(
+        select(AIPick).where(
+            AIPick.pick_date >= week_start,
+            AIPick.pick_date <= today,
+        ).order_by(AIPick.pick_date)
+    )
+    all_picks = picks_q.scalars().all()
+
+    if not all_picks:
+        return ""
+
+    # 汇总本周选股组合的变化
+    from collections import defaultdict, Counter
+    stock_appearances = Counter()
+    stock_weights = defaultdict(list)
+    latest_pick = all_picks[-1]
+    latest_picks_data = json.loads(latest_pick.picks_json)
+
+    for pick in all_picks:
+        picks_data = json.loads(pick.picks_json)
+        for p in picks_data:
+            code = p.get("code", "")
+            name = p.get("name", "")
+            stock_appearances[f"{name}({code})"] += 1
+            stock_weights[code].append(p.get("weight", 0))
+
+    # 最新组合详情
+    stock_details = []
+    for p in latest_picks_data:
+        code = p.get("code", "")
+        name = p.get("name", "")
+        market = p.get("market", "")
+        weight = p.get("weight", 0)
+        reason = p.get("reason", "")
+        detail = f"{name}({code}, {market}股)，最新建议仓位{weight:.1f}%"
+        if reason:
+            detail += f"，推荐理由：{reason[:120]}"
+
+        # 获取最新评级
+        for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+            latest_date = await db.scalar(
+                select(func.max(Rating.date)).where(Rating.model_type == model_type)
+            )
+            if latest_date:
+                r_result = await db.execute(
+                    select(Rating).where(
+                        Rating.code == code,
+                        Rating.date == latest_date,
+                        Rating.model_type == model_type,
+                    )
+                )
+                r = r_result.scalar_one_or_none()
+                if r:
+                    detail += f"；{label}评分{r.total_score:.1f}/{r.rating}"
+        stock_details.append(detail)
+
+    # 计算一周收益
+    codes = [p.get("code", "") for p in latest_picks_data]
+    weight_map = {p.get("code", ""): p.get("weight", 0) for p in latest_picks_data}
+    perf_note = ""
+    start_date = week_start - timedelta(days=5)
+    price_q = (
+        select(StockPrice)
+        .where(StockPrice.code.in_(codes), StockPrice.date >= start_date)
+        .order_by(StockPrice.date)
+    )
+    price_rows = (await db.execute(price_q)).scalars().all()
+    if price_rows:
+        price_by_code = defaultdict(list)
+        for p in price_rows:
+            price_by_code[p.code].append((p.date, p.close))
+        daily_rets = defaultdict(dict)
+        for code, prices in price_by_code.items():
+            prices.sort(key=lambda x: x[0])
+            for i in range(1, len(prices)):
+                if prices[i-1][1] and prices[i-1][1] > 0:
+                    ret = (prices[i][1] - prices[i-1][1]) / prices[i-1][1] * 100
+                    daily_rets[code][prices[i][0]] = ret
+        week_dates = sorted(d for rets in daily_rets.values() for d in rets.keys() if d >= week_start)
+        if week_dates:
+            cum_factor = 1.0
+            for d in week_dates:
+                port_ret = 0
+                for code in codes:
+                    w_pct = weight_map.get(code, 0) / 100.0
+                    port_ret += daily_rets.get(code, {}).get(d, 0) * w_pct
+                cum_factor *= (1 + port_ret / 100)
+            week_ret = (cum_factor - 1) * 100
+            perf_note = f"AI推荐组合本周模拟收益率：{week_ret:+.2f}%。"
+
+    # 本周出现次数最多的股票
+    most_common = stock_appearances.most_common(5)
+    consistency_note = "本周最稳定推荐：" + "、".join(f"{s}({c}次)" for s, c in most_common)
+
+    return f"""你是一位专业的房地产股票投资顾问。以下是AI智能选股系统本周的推荐数据汇总。
+
+本周时间范围：{week_start} 至 {week_end}
+本周共生成{len(all_picks)}次AI推荐组合。{perf_note}
+{consistency_note}
+
+最新组合详情（{latest_pick.pick_date}）：
+{"；".join(stock_details)}
+
+请基于以上数据，撰写一份AI推荐选股周报。要求：
+1. 标题：简明概括AI选股组合本周表现要点（15-30字）
+2. 内容分5个部分，使用Markdown格式：
+   - **组合周度回顾**：本周AI选股组合整体表现、收益分析
+   - **持仓稳定性分析**：哪些股票持续被推荐（高置信度），哪些股票新进/退出
+   - **重点推荐深度解读**：仓位最重或推荐最一致的2-3只股票，深度分析推荐逻辑
+   - **下周组合展望**：基于当前评级趋势，预判下周组合可能的调整方向
+   - **风险提示**：组合集中度风险、个股风险等
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "周报标题", "content": "Markdown格式的周报正文"}}"""
+
+
+async def _build_weekly_watchlist_prompt(db: AsyncSession, user_id: int) -> str:
+    """构建自选股周报 prompt"""
+    week_start, week_end = _get_week_range()
+    today = date.today()
+
+    # 获取用户自选股
+    wl_result = await db.execute(
+        select(Watchlist).where(Watchlist.user_id == user_id).order_by(Watchlist.added_at)
+    )
+    watchlist = wl_result.scalars().all()
+    if not watchlist:
+        return ""
+
+    codes = [w.stock_code for w in watchlist]
+
+    # 获取仓位
+    pw_result = await db.execute(
+        select(PortfolioWeight).where(
+            PortfolioWeight.user_id == user_id,
+            PortfolioWeight.stock_code.in_(codes),
+        )
+    )
+    weight_map = {pw.stock_code: pw.weight for pw in pw_result.scalars().all()}
+
+    # 获取本周评级数据（周初和周末对比）
+    stock_details = []
+    for w in watchlist:
+        detail = f"{w.stock_name}({w.stock_code}, {w.market}股)"
+        pw = weight_map.get(w.stock_code, 0)
+        if pw > 0:
+            detail += f"，仓位{pw:.1f}%"
+
+        for model_type, label in [("quant_ai", "量化AI"), ("soochow", "东吴地产")]:
+            # 本周最新评级
+            latest_date = await db.scalar(
+                select(func.max(Rating.date)).where(
+                    Rating.model_type == model_type,
+                    Rating.date >= week_start,
+                    Rating.date <= today,
+                )
+            )
+            if latest_date:
+                r = (await db.execute(
+                    select(Rating).where(
+                        Rating.code == w.stock_code,
+                        Rating.date == latest_date,
+                        Rating.model_type == model_type,
+                    )
+                )).scalar_one_or_none()
+                if r:
+                    detail += f"；{label}最新{r.total_score:.1f}/{r.rating}"
+
+            # 本周初评级
+            first_date = await db.scalar(
+                select(func.min(Rating.date)).where(
+                    Rating.model_type == model_type,
+                    Rating.date >= week_start,
+                    Rating.date <= today,
+                )
+            )
+            if first_date and first_date != latest_date:
+                r0 = (await db.execute(
+                    select(Rating).where(
+                        Rating.code == w.stock_code,
+                        Rating.date == first_date,
+                        Rating.model_type == model_type,
+                    )
+                )).scalar_one_or_none()
+                if r0 and r:
+                    chg = r.total_score - r0.total_score
+                    detail += f"(周变化{chg:+.1f})"
+
+        stock_details.append(detail)
+
+    # 本周收益率
+    perf_note = ""
+    has_weights = any(v > 0 for v in weight_map.values())
+    if has_weights:
+        from collections import defaultdict
+        start_date = week_start - timedelta(days=5)
+        price_q = (
+            select(StockPrice)
+            .where(StockPrice.code.in_(codes), StockPrice.date >= start_date)
+            .order_by(StockPrice.date)
+        )
+        price_rows = (await db.execute(price_q)).scalars().all()
+        price_by_code = defaultdict(list)
+        for p in price_rows:
+            price_by_code[p.code].append((p.date, p.close))
+        daily_rets = defaultdict(dict)
+        for code, prices in price_by_code.items():
+            prices.sort(key=lambda x: x[0])
+            for i in range(1, len(prices)):
+                if prices[i-1][1] and prices[i-1][1] > 0:
+                    ret = (prices[i][1] - prices[i-1][1]) / prices[i-1][1] * 100
+                    daily_rets[code][prices[i][0]] = ret
+        week_dates = sorted(d for rets in daily_rets.values() for d in rets.keys() if d >= week_start)
+        if week_dates:
+            cum_factor = 1.0
+            for d in week_dates:
+                port_ret = 0
+                for code in codes:
+                    w_pct = weight_map.get(code, 0) / 100.0
+                    port_ret += daily_rets.get(code, {}).get(d, 0) * w_pct
+                cum_factor *= (1 + port_ret / 100)
+            week_ret = (cum_factor - 1) * 100
+            perf_note = f"模拟组合本周收益率：{week_ret:+.2f}%。"
+
+    total_weight = sum(weight_map.values())
+    weight_status = f"总仓位{total_weight:.1f}%（{'已满配' if abs(total_weight - 100) < 0.01 else '未满配'}）"
+
+    return f"""你是一位专业的房地产股票投资顾问。以下是用户自选股票池（{len(watchlist)}只）的本周情况汇总。
+
+本周时间范围：{week_start} 至 {week_end}
+{weight_status}。{perf_note}
+
+各股票本周详情：
+{"；".join(stock_details)}
+
+请基于以上数据，撰写一份个性化的自选股周报。要求：
+1. 标题：简明概括自选组合本周要点（15-30字）
+2. 内容分5个部分，使用Markdown格式：
+   - **组合周度表现**：自选股整体本周表现回顾，收益归因分析
+   - **个股周度点评**：逐一评述每只自选股本周的评级变动和市场表现
+   - **仓位调整建议**：基于本周评级变化，给出下周仓位调整的具体建议
+   - **下周关注要点**：重要事件日历（财报、政策等）、技术面关键位
+   - **风险与机会**：下周需要关注的风险因素和潜在机会
+
+请严格按以下JSON格式返回，不要附加其他文字：
+{{"title": "周报标题", "content": "Markdown格式的周报正文"}}"""
+
+
+@router.get("/weekly/industry", response_model=WeeklyDigestOut)
+async def get_weekly_industry(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成行业周报"""
+    week_start, week_end = _get_week_range()
+
+    if not force:
+        cached = await db.execute(
+            select(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "industry",
+                WeeklyDigest.user_id == 0,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    prompt = await _build_weekly_industry_prompt(db)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="本周暂无评级数据，无法生成行业周报")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成周报失败，请稍后重试")
+
+    if force:
+        await db.execute(
+            delete(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "industry",
+                WeeklyDigest.user_id == 0,
+            )
+        )
+
+    digest = WeeklyDigest(
+        week_start=week_start,
+        week_end=week_end,
+        digest_type="industry",
+        user_id=0,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
+
+
+@router.get("/weekly/ai-picks", response_model=WeeklyDigestOut)
+async def get_weekly_ai_picks(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成AI推荐选股周报"""
+    week_start, week_end = _get_week_range()
+
+    if not force:
+        cached = await db.execute(
+            select(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "ai_picks",
+                WeeklyDigest.user_id == 0,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    prompt = await _build_weekly_ai_picks_prompt(db)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="本周暂无AI推荐选股数据")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成周报失败，请稍后重试")
+
+    if force:
+        await db.execute(
+            delete(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "ai_picks",
+                WeeklyDigest.user_id == 0,
+            )
+        )
+
+    digest = WeeklyDigest(
+        week_start=week_start,
+        week_end=week_end,
+        digest_type="ai_picks",
+        user_id=0,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
+
+
+@router.get("/weekly/watchlist", response_model=WeeklyDigestOut)
+async def get_weekly_watchlist(
+    force: bool = Query(False),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取/生成自选股周报"""
+    week_start, week_end = _get_week_range()
+
+    if not force:
+        cached = await db.execute(
+            select(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "watchlist",
+                WeeklyDigest.user_id == user.id,
+            )
+        )
+        existing = cached.scalar_one_or_none()
+        if existing:
+            return existing
+
+    wl_count = await db.scalar(
+        select(func.count(Watchlist.id)).where(Watchlist.user_id == user.id)
+    )
+    if not wl_count:
+        raise HTTPException(status_code=404, detail="请先添加自选股")
+
+    prompt = await _build_weekly_watchlist_prompt(db, user.id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="暂无数据，无法生成周报")
+
+    result = await _generate_digest_with_multi_model(prompt)
+    if not result["title"]:
+        raise HTTPException(status_code=500, detail="AI生成周报失败，请稍后重试")
+
+    if force:
+        await db.execute(
+            delete(WeeklyDigest).where(
+                WeeklyDigest.week_start == week_start,
+                WeeklyDigest.digest_type == "watchlist",
+                WeeklyDigest.user_id == user.id,
+            )
+        )
+
+    digest = WeeklyDigest(
+        week_start=week_start,
+        week_end=week_end,
+        digest_type="watchlist",
+        user_id=user.id,
+        title=result["title"],
+        content=result["content"],
+        model_sources=result["sources"],
+    )
+    db.add(digest)
+    await db.commit()
+    await db.refresh(digest)
+    return digest
+
+
+@router.get("/weekly/history", response_model=WeeklyDigestListOut)
+async def get_weekly_history(
+    digest_type: str = Query("industry"),
+    limit: int = Query(10, ge=1, le=52),
+    user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取周报历史列表"""
+    user_id = 0 if digest_type != "watchlist" else user.id
+    result = await db.execute(
+        select(WeeklyDigest).where(
+            WeeklyDigest.digest_type == digest_type,
+            WeeklyDigest.user_id == user_id,
+        ).order_by(desc(WeeklyDigest.week_start)).limit(limit)
+    )
+    items = result.scalars().all()
+    return WeeklyDigestListOut(items=items, total=len(items))
 
 
 # ========== 公开分享页面（无需登录） ==========

@@ -177,6 +177,24 @@ class DailyDigest(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
+class WeeklyDigest(Base):
+    """每周AI周报"""
+    __tablename__ = "weekly_digests"
+    __table_args__ = (
+        UniqueConstraint("week_start", "digest_type", "user_id", name="uq_weekly_start_type_user"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    week_start = Column(Date, nullable=False, index=True)       # 本周一日期，作为周标识
+    week_end = Column(Date, nullable=False)                     # 本周五日期
+    digest_type = Column(String(20), nullable=False)            # industry / watchlist / ai_picks
+    user_id = Column(Integer, nullable=False, default=0)        # 0=全局, >0=用户专属
+    title = Column(String(300), nullable=False)
+    content = Column(Text, nullable=False)
+    model_sources = Column(String(200), default="")
+    created_at = Column(DateTime, default=datetime.now)
+
+
 class AIPick(Base):
     """AI推荐选股组合（每日缓存）"""
     __tablename__ = "ai_picks"

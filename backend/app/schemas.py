@@ -251,6 +251,27 @@ class DailyDigestOut(BaseModel):
         from_attributes = True
 
 
+# ========== 每周周报相关 ==========
+class WeeklyDigestOut(BaseModel):
+    id: int
+    week_start: date
+    week_end: date
+    digest_type: str
+    user_id: int
+    title: str
+    content: str
+    model_sources: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class WeeklyDigestListOut(BaseModel):
+    items: List[WeeklyDigestOut]
+    total: int
+
+
 # ========== AI推荐选股相关 ==========
 class AIPickItem(BaseModel):
     stock_code: str

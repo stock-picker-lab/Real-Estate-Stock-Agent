@@ -16,7 +16,7 @@ from sqlalchemy import select, func, delete
 from app.api import router
 from app.config import ADMIN_USERNAME, ADMIN_PASSWORD, UPLOAD_DIR, API_KEY, JWT_SECRET, JWT_ALGORITHM
 from app.database import init_db, async_session
-from app.models import Rating, Stock, User, DailyDigest, AIPick
+from app.models import Rating, Stock, User, DailyDigest, WeeklyDigest, AIPick
 from app.auth import hash_password
 from app.scheduler import init_stock_list, refresh_all_data
 from app.news_fetcher import preload_news_cache
@@ -170,6 +170,92 @@ async def generate_all_digests():
     logger.info("每日日报自动生成完成")
 
 
+async def generate_all_weeklies():
+    """每周五自动生成所有周报（行业周报 + AI选股周报）"""
+    from app.api import (
+        _build_weekly_industry_prompt,
+        _build_weekly_ai_picks_prompt,
+        _generate_digest_with_multi_model,
+        _get_week_range,
+    )
+
+    week_start, week_end = _get_week_range()
+    logger.info(f"开始自动生成周报 ({week_start} ~ {week_end})...")
+
+    async with async_session() as db:
+        # 1. 行业周报
+        try:
+            existing = await db.execute(
+                select(WeeklyDigest).where(
+                    WeeklyDigest.week_start == week_start,
+                    WeeklyDigest.digest_type == "industry",
+                    WeeklyDigest.user_id == 0,
+                )
+            )
+            if existing.scalar_one_or_none():
+                logger.info("行业周报本周已存在，跳过")
+            else:
+                prompt = await _build_weekly_industry_prompt(db)
+                if prompt:
+                    result = await _generate_digest_with_multi_model(prompt)
+                    if result["title"]:
+                        digest = WeeklyDigest(
+                            week_start=week_start,
+                            week_end=week_end,
+                            digest_type="industry",
+                            user_id=0,
+                            title=result["title"],
+                            content=result["content"],
+                            model_sources=result["sources"],
+                        )
+                        db.add(digest)
+                        await db.commit()
+                        logger.info(f"✓ 行业周报已生成: {result['title'][:30]}")
+                    else:
+                        logger.warning("行业周报: AI生成失败")
+                else:
+                    logger.warning("行业周报: 暂无评级数据，跳过")
+        except Exception as e:
+            logger.error(f"行业周报生成失败: {e}")
+
+        # 2. AI选股周报
+        try:
+            existing = await db.execute(
+                select(WeeklyDigest).where(
+                    WeeklyDigest.week_start == week_start,
+                    WeeklyDigest.digest_type == "ai_picks",
+                    WeeklyDigest.user_id == 0,
+                )
+            )
+            if existing.scalar_one_or_none():
+                logger.info("AI选股周报本周已存在，跳过")
+            else:
+                prompt = await _build_weekly_ai_picks_prompt(db)
+                if prompt:
+                    result = await _generate_digest_with_multi_model(prompt)
+                    if result["title"]:
+                        digest = WeeklyDigest(
+                            week_start=week_start,
+                            week_end=week_end,
+                            digest_type="ai_picks",
+                            user_id=0,
+                            title=result["title"],
+                            content=result["content"],
+                            model_sources=result["sources"],
+                        )
+                        db.add(digest)
+                        await db.commit()
+                        logger.info(f"✓ AI选股周报已生成: {result['title'][:30]}")
+                    else:
+                        logger.warning("AI选股周报: AI生成失败")
+                else:
+                    logger.warning("AI选股周报: 暂无AI选股数据，跳过")
+        except Exception as e:
+            logger.error(f"AI选股周报生成失败: {e}")
+
+    logger.info("每周周报自动生成完成")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import os
@@ -199,8 +285,18 @@ async def lifespan(app: FastAPI):
         id="digest_0830",
         replace_existing=True,
     )
+    # 定时任务3: 每周五 17:00 自动生成周报（收盘后汇总全周数据）
+    scheduler.add_job(
+        generate_all_weeklies,
+        "cron",
+        day_of_week="fri",
+        hour=17,
+        minute=0,
+        id="weekly_fri_17",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("定时任务已启动: 每天 6:00 评分 + 8:30 生成日报")
+    logger.info("定时任务已启动: 每天 6:00 评分 + 8:30 生成日报 + 每周五 17:00 生成周报")
 
     # 启动时检查并自动刷新（后台异步执行，不阻塞启动）
     asyncio.create_task(check_and_refresh())

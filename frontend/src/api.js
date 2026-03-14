@@ -178,6 +178,16 @@ export const api = {
   getAiPicksDigest: (force = false) =>
     request(`/digest/ai-picks${force ? '?force=true' : ''}`),
 
+  // ========== 每周AI周报 ==========
+  getWeeklyIndustry: (force = false) =>
+    request(`/weekly/industry${force ? '?force=true' : ''}`),
+  getWeeklyAiPicks: (force = false) =>
+    request(`/weekly/ai-picks${force ? '?force=true' : ''}`),
+  getWeeklyWatchlist: (force = false) =>
+    request(`/weekly/watchlist${force ? '?force=true' : ''}`),
+  getWeeklyHistory: (digestType = 'industry', limit = 10) =>
+    request(`/weekly/history?digest_type=${digestType}&limit=${limit}`),
+
   // ========== AI推荐选股 ==========
   getAIPicks: (force = false, days = 30) => {
     const qs = new URLSearchParams()
